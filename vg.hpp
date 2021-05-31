@@ -79,6 +79,10 @@ private:
   vk::PresentModeKHR choosePresentMode();
   void createSwapchain();
 
+  void createSwapchainDependents();
+  void destroySwapchainDependents();
+  void recreateSwapchain();
+
   std::vector<vk::Image> images;
 
   std::vector<vk::ImageView> image_views;

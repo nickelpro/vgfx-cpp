@@ -21,8 +21,8 @@ Window::Window(const std::string& title, int width, int height) {
   if(!glfwInit())
     throw std::runtime_error("Failed to init glfw");
 
+  glfwWindowHint(GLFW_RESIZABLE, true);
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
   m_window = glfwCreateWindow(width, height, title.data(), nullptr, nullptr);
 }
 
@@ -49,6 +49,14 @@ Renderer::Renderer(Window window) : window {window} {
   chooseSurfaceFormat();
   chooseImageCount();
   chooseSwapExtent();
+
+  cmd_pool = dev.createCommandPool({.queueFamilyIndex {rend_group.qfam_idx}});
+  createSwapchainDependents();
+
+  createSyncPrimitives();
+}
+
+void Renderer::createSwapchainDependents() {
   createSwapchain();
   images = dev.getSwapchainImagesKHR(swapchain);
 
@@ -56,14 +64,23 @@ Renderer::Renderer(Window window) : window {window} {
   createRenderPass();
   createPipeline();
   createFramebuffers();
-  cmd_pool = dev.createCommandPool({.queueFamilyIndex {rend_group.qfam_idx}});
   cmd_bufs = dev.allocateCommandBuffers({
       .commandPool {cmd_pool},
       .commandBufferCount {static_cast<std::uint32_t>(framebuffers.size())},
   });
   recordCommandBuffers();
+}
 
-  createSyncPrimitives();
+void Renderer::destroySwapchainDependents() {
+  for(auto fb : framebuffers)
+    dev.destroy(fb);
+  dev.destroy(pipeline);
+  dev.destroy(layout);
+  dev.destroy(render_pass);
+  for(auto image_view : image_views)
+    dev.destroy(image_view);
+
+  dev.destroy(swapchain);
 }
 
 void Renderer::destroy() {
@@ -76,15 +93,8 @@ void Renderer::destroy() {
   }
 
   dev.destroy(cmd_pool);
-  for(auto fb : framebuffers)
-    dev.destroy(fb);
-  dev.destroy(pipeline);
-  dev.destroy(layout);
-  dev.destroy(render_pass);
-  for(auto image_view : image_views)
-    dev.destroy(image_view);
 
-  dev.destroy(swapchain);
+  destroySwapchainDependents();
 
   dev.destroy();
   inst.destroy(surf);
@@ -96,10 +106,15 @@ void Renderer::draw() {
          UINT64_MAX) != vk::Result::eSuccess)
     throw std::runtime_error {"wait failure or timeout"};
 
-  // clang-format off
-  auto img_idx {dev.acquireNextImageKHR(
-      swapchain, UINT64_MAX, image_available[frame_idx]).value};
-  // clang-format on
+  auto [result, img_idx] {dev.acquireNextImageKHR(
+      swapchain, UINT64_MAX, image_available[frame_idx])};
+
+  if(result == vk::Result::eSuboptimalKHR ||
+      result == vk::Result::eErrorOutOfDateKHR) {
+    recreateSwapchain();
+    return;
+  } else if(result != vk::Result::eSuccess)
+    throw std::runtime_error {"failed to acquire swapchain image"};
 
   if(image_inflight[img_idx] &&
       dev.waitForFences(std::array {image_inflight[img_idx]}, true,
@@ -121,14 +136,22 @@ void Renderer::draw() {
 
   dev.resetFences(std::array {frame_inflight[frame_idx]});
   gfx_q.submit(submit_info, frame_inflight[frame_idx]);
-  if(gfx_q.presentKHR({
-         .waitSemaphoreCount {1},
-         .pWaitSemaphores {&render_finished[frame_idx]},
-         .swapchainCount {1},
-         .pSwapchains {&swapchain},
-         .pImageIndices {&img_idx},
-     }) != vk::Result::eSuccess)
-    throw std::runtime_error {"failed to Present"};
+
+  try {
+    result = gfx_q.presentKHR({
+        .waitSemaphoreCount {1},
+        .pWaitSemaphores {&render_finished[frame_idx]},
+        .swapchainCount {1},
+        .pSwapchains {&swapchain},
+        .pImageIndices {&img_idx},
+    });
+  } catch(vk::SystemError& err) {
+    if(err.code() == vk::Result::eSuboptimalKHR ||
+        err.code() == vk::Result::eErrorOutOfDateKHR)
+      recreateSwapchain();
+    else
+      throw err;
+  }
 
   ++frame_idx %= img_count;
 }
@@ -268,6 +291,16 @@ void Renderer::createSwapchain() {
       .presentMode {choosePresentMode()},
       .clipped {true},
   });
+}
+
+void Renderer::recreateSwapchain() {
+  dev.waitIdle();
+  dev.freeCommandBuffers(cmd_pool, cmd_bufs);
+  destroySwapchainDependents();
+  rend_group.surf_details.caps =
+      rend_group.dev.getSurfaceCapabilitiesKHR(surf);
+  chooseSwapExtent();
+  createSwapchainDependents();
 }
 
 void Renderer::createImageViews() {
