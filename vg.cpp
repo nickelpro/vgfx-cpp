@@ -294,6 +294,13 @@ void Renderer::createSwapchain() {
 }
 
 void Renderer::recreateSwapchain() {
+  int width, height;
+  glfwGetFramebufferSize(window, &width, &height);
+  while(!width || !height) {
+    glfwWaitEvents();
+    glfwGetFramebufferSize(window, &width, &height);
+  }
+
   dev.waitIdle();
   dev.freeCommandBuffers(cmd_pool, cmd_bufs);
   destroySwapchainDependents();
